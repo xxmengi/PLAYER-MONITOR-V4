@@ -1,0 +1,1334 @@
+Features:
+    - Live player directory
+    - Player search and selection
+    - Character information
+    - FPS / Ping / Memory monitoring
+    - Server diagnostics
+    - Draggable interface
+    - RightShift visibility toggle
+    - Dynamic player updates
+
+--==================================================
+-- SERVICES
+--==================================================
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Stats = game:GetService("Stats")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--==================================================
+-- CONFIGURATION
+--==================================================
+
+local Config = {
+    Name = "PlayerMonitorV4",
+
+    ToggleKey = Enum.KeyCode.RightShift,
+
+    UpdateInterval = 1,
+
+    AnimationSpeed = 0.2,
+
+    Theme = {
+        Background = Color3.fromRGB(16, 13, 27),
+        Panel = Color3.fromRGB(28, 22, 43),
+        Card = Color3.fromRGB(39, 30, 58),
+        CardHover = Color3.fromRGB(52, 39, 76),
+
+        Accent = Color3.fromRGB(155, 92, 255),
+        AccentDark = Color3.fromRGB(103, 57, 184),
+
+        Text = Color3.fromRGB(245, 240, 255),
+        Muted = Color3.fromRGB(166, 151, 190),
+
+        Success = Color3.fromRGB(91, 220, 153),
+        Warning = Color3.fromRGB(255, 194, 92),
+        Danger = Color3.fromRGB(255, 100, 120),
+
+        Border = Color3.fromRGB(91, 68, 124),
+    }
+}
+
+local Theme = Config.Theme
+
+--==================================================
+-- STATE
+--==================================================
+
+local State = {
+    Visible = true,
+    CurrentPage = "Dashboard",
+
+    SelectedPlayer = nil,
+
+    FPS = 0,
+    Ping = 0,
+    Memory = 0,
+
+    Running = true,
+
+    Connections = {},
+    PlayerConnections = {},
+}
+
+--==================================================
+-- CLEANUP EXISTING GUI
+--==================================================
+
+local Existing = PlayerGui:FindFirstChild(Config.Name)
+
+if Existing then
+    Existing:Destroy()
+end
+
+--==================================================
+-- HELPER FUNCTIONS
+--==================================================
+
+local function Create(className, properties, parent)
+    local object = Instance.new(className)
+
+    for property, value in pairs(properties or {}) do
+        object[property] = value
+    end
+
+    object.Parent = parent
+
+    return object
+end
+
+local function Corner(parent, radius)
+    return Create("UICorner", {
+        CornerRadius = UDim.new(0, radius or 10)
+    }, parent)
+end
+
+local function Stroke(parent, color, transparency)
+    return Create("UIStroke", {
+        Color = color or Theme.Border,
+        Thickness = 1,
+        Transparency = transparency or 0.35,
+    }, parent)
+end
+
+local function Padding(parent, amount)
+    return Create("UIPadding", {
+        PaddingTop = UDim.new(0, amount),
+        PaddingBottom = UDim.new(0, amount),
+        PaddingLeft = UDim.new(0, amount),
+        PaddingRight = UDim.new(0, amount),
+    }, parent)
+end
+
+local function Label(parent, text, size, color, font)
+    return Create("TextLabel", {
+        BackgroundTransparency = 1,
+
+        Text = text or "",
+        TextSize = size or 14,
+
+        TextColor3 = color or Theme.Text,
+
+        Font = font or Enum.Font.Gotham,
+
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center,
+
+        Size = UDim2.new(1, 0, 0, 22),
+
+    }, parent)
+end
+
+local function Button(parent, text, size)
+    local button = Create("TextButton", {
+        BackgroundColor3 = Theme.Card,
+
+        Text = text,
+        TextColor3 = Theme.Text,
+
+        TextSize = 13,
+        Font = Enum.Font.GothamMedium,
+
+        AutoButtonColor = false,
+
+        Size = size or UDim2.new(1, 0, 0, 38),
+
+    }, parent)
+
+    Corner(button, 9)
+    Stroke(button)
+
+    button.MouseEnter:Connect(function()
+        TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {BackgroundColor3 = Theme.CardHover}
+        ):Play()
+    end)
+
+    button.MouseLeave:Connect(function()
+        TweenService:Create(
+            button,
+            TweenInfo.new(0.15),
+            {BackgroundColor3 = Theme.Card}
+        ):Play()
+    end)
+
+    return button
+end
+
+local function Tween(object, properties)
+    local animation = TweenService:Create(
+        object,
+        TweenInfo.new(
+            Config.AnimationSpeed,
+            Enum.EasingStyle.Quart,
+            Enum.EasingDirection.Out
+        ),
+        properties
+    )
+
+    animation:Play()
+
+    return animation
+end
+
+local function GetPing(player)
+    local success, result = pcall(function()
+        return player:GetNetworkPing() * 1000
+    end)
+
+    if success then
+        return math.floor(result)
+    end
+
+    return 0
+end
+
+local function GetMemory()
+    local success, result = pcall(function()
+        return Stats:GetTotalMemoryUsageMb()
+    end)
+
+    if success then
+        return math.floor(result)
+    end
+
+    return 0
+end
+
+local function GetCharacter(player)
+    return player.Character
+end
+
+local function GetHumanoid(player)
+    local character = GetCharacter(player)
+
+    if not character then
+        return nil
+    end
+
+    return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function GetRoot(player)
+    local character = GetCharacter(player)
+
+    if not character then
+        return nil
+    end
+
+    return character:FindFirstChild("HumanoidRootPart")
+end
+
+local function FormatNumber(number)
+    return tostring(math.floor(number or 0))
+end
+
+--==================================================
+-- SCREEN GUI
+--==================================================
+
+local ScreenGui = Create("ScreenGui", {
+    Name = Config.Name,
+
+    ResetOnSpawn = false,
+
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+
+    IgnoreGuiInset = false,
+
+    DisplayOrder = 100,
+
+}, PlayerGui)
+
+--==================================================
+-- MAIN WINDOW
+--==================================================
+
+local Main = Create("Frame", {
+    Name = "Main",
+
+    Size = UDim2.fromOffset(900, 590),
+
+    Position = UDim2.new(0.5, -450, 0.5, -295),
+
+    BackgroundColor3 = Theme.Background,
+
+    BackgroundTransparency = 0.04,
+
+    BorderSizePixel = 0,
+
+    ClipsDescendants = true,
+
+}, ScreenGui)
+
+Corner(Main, 16)
+Stroke(Main, Theme.Accent, 0.25)
+
+-- Background gradient
+
+Create("UIGradient", {
+    Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(
+            0,
+            Color3.fromRGB(28, 20, 45)
+        ),
+
+        ColorSequenceKeypoint.new(
+            1,
+            Color3.fromRGB(13, 12, 24)
+        )
+    }),
+
+    Rotation = 35,
+
+}, Main)
+
+--==================================================
+-- DRAGGING
+--==================================================
+
+local dragging = false
+local dragStart
+local startPosition
+local dragInput
+
+local function UpdateDrag(input)
+    local delta = input.Position - dragStart
+
+    Main.Position = UDim2.new(
+        startPosition.X.Scale,
+        startPosition.X.Offset + delta.X,
+
+        startPosition.Y.Scale,
+        startPosition.Y.Offset + delta.Y
+    )
+end
+
+local function ConnectDragging(handle)
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+
+            dragging = true
+
+            dragStart = input.Position
+            startPosition = Main.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    handle.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch then
+
+            dragInput = input
+        end
+    end)
+end
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input == dragInput then
+        UpdateDrag(input)
+    end
+end)
+
+--==================================================
+-- HEADER
+--==================================================
+
+local Header = Create("Frame", {
+    Name = "Header",
+
+    Size = UDim2.new(1, 0, 0, 65),
+
+    BackgroundColor3 = Theme.Panel,
+
+    BackgroundTransparency = 0.12,
+
+    BorderSizePixel = 0,
+
+}, Main)
+
+ConnectDragging(Header)
+
+local Logo = Create("Frame", {
+    Size = UDim2.fromOffset(37, 37),
+
+    Position = UDim2.fromOffset(17, 14),
+
+    BackgroundColor3 = Theme.Accent,
+
+}, Header)
+
+Corner(Logo, 11)
+
+Label(
+    Logo,
+    "PM",
+    15,
+    Color3.new(1, 1, 1),
+    Enum.Font.GothamBold
+).TextXAlignment = Enum.TextXAlignment.Center
+
+local HeaderTitle = Create("TextLabel", {
+    BackgroundTransparency = 1,
+
+    Position = UDim2.fromOffset(64, 11),
+
+    Size = UDim2.fromOffset(280, 23),
+
+    Text = "PLAYER MONITOR V4",
+
+    TextColor3 = Theme.Text,
+
+    TextSize = 16,
+
+    Font = Enum.Font.GothamBold,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+
+}, Header)
+
+local HeaderSubtitle = Create("TextLabel", {
+    BackgroundTransparency = 1,
+
+    Position = UDim2.fromOffset(64, 34),
+
+    Size = UDim2.fromOffset(300, 17),
+
+    Text = "ADVANCED PLAYER DIAGNOSTICS",
+
+    TextColor3 = Theme.Muted,
+
+    TextSize = 10,
+
+    Font = Enum.Font.GothamMedium,
+
+    TextXAlignment = Enum.TextXAlignment.Left,
+
+}, Header)
+
+local OnlineStatus = Create("TextLabel", {
+    BackgroundColor3 = Color3.fromRGB(30, 65, 51),
+
+    Position = UDim2.new(1, -112, 0, 19),
+
+    Size = UDim2.fromOffset(73, 27),
+
+    Text = "● ONLINE",
+
+    TextColor3 = Theme.Success,
+
+    TextSize = 10,
+
+    Font = Enum.Font.GothamBold,
+
+}, Header)
+
+Corner(OnlineStatus, 8)
+
+local CloseButton = Button(
+    Header,
+    "×",
+    UDim2.fromOffset(30, 30)
+)
+
+CloseButton.Position = UDim2.new(1, -42, 0, 17)
+CloseButton.TextSize = 21
+CloseButton.BackgroundColor3 = Color3.fromRGB(75, 35, 52)
+
+CloseButton.MouseButton1Click:Connect(function()
+    ScreenGui:Destroy()
+end)
+
+--==================================================
+-- SIDEBAR
+--==================================================
+
+local Sidebar = Create("Frame", {
+    Name = "Sidebar",
+
+    Position = UDim2.fromOffset(0, 65),
+
+    Size = UDim2.new(0, 180, 1, -65),
+
+    BackgroundColor3 = Theme.Panel,
+
+    BackgroundTransparency = 0.15,
+
+    BorderSizePixel = 0,
+
+}, Main)
+
+local SidebarPadding = Padding(Sidebar, 12)
+
+local SidebarLayout = Create("UIListLayout", {
+    Padding = UDim.new(0, 9),
+
+    SortOrder = Enum.SortOrder.LayoutOrder,
+
+}, Sidebar)
+
+Label(
+    Sidebar,
+    "MAIN MENU",
+    10,
+    Theme.Muted,
+    Enum.Font.GothamBold
+).LayoutOrder = 1
+
+--==================================================
+-- CONTENT AREA
+--==================================================
+
+local Content = Create("Frame", {
+    Name = "Content",
+
+    Position = UDim2.fromOffset(180, 65),
+
+    Size = UDim2.new(1, -180, 1, -65),
+
+    BackgroundTransparency = 1,
+
+}, Main)
+
+local Pages = {}
+
+local function CreatePage(name)
+    local page = Create("ScrollingFrame", {
+        Name = name,
+
+        Size = UDim2.new(1, 0, 1, 0),
+
+        BackgroundTransparency = 1,
+
+        BorderSizePixel = 0,
+
+        ScrollBarThickness = 4,
+
+        ScrollBarImageColor3 = Theme.Accent,
+
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+
+        Visible = false,
+
+    }, Content)
+
+    Padding(page, 18)
+
+    local layout = Create("UIListLayout", {
+        Padding = UDim.new(0, 13),
+
+        SortOrder = Enum.SortOrder.LayoutOrder,
+
+    }, page)
+
+    Pages[name] = page
+
+    return page
+end
+
+local DashboardPage = CreatePage("Dashboard")
+local PlayersPage = CreatePage("Players")
+local DiagnosticsPage = CreatePage("Diagnostics")
+
+--==================================================
+-- PAGE NAVIGATION
+--==================================================
+
+local Navigation = {}
+
+local function SetPage(name)
+    if not Pages[name] then
+        return
+    end
+
+    State.CurrentPage = name
+
+    for pageName, page in pairs(Pages) do
+        page.Visible = pageName == name
+    end
+
+    for pageName, button in pairs(Navigation) do
+        if pageName == name then
+            button.BackgroundColor3 = Theme.AccentDark
+            button.TextColor3 = Color3.new(1, 1, 1)
+        else
+            button.BackgroundColor3 = Theme.Card
+            button.TextColor3 = Theme.Muted
+        end
+    end
+end
+
+local function AddNavigation(name, icon)
+    local button = Button(
+        Sidebar,
+        icon .. "   " .. name,
+        UDim2.new(1, 0, 0, 39)
+    )
+
+    Navigation[name] = button
+
+    button.MouseButton1Click:Connect(function()
+        SetPage(name)
+    end)
+
+    return button
+end
+
+AddNavigation("Dashboard", "⌂")
+AddNavigation("Players", "◎")
+AddNavigation("Diagnostics", "◈")
+
+local SidebarFooter = Label(
+    Sidebar,
+    "PLAYER MONITOR V4\nPURPLE EDITION",
+    9,
+    Theme.Muted
+)
+
+SidebarFooter.LayoutOrder = 100
+
+SetPage("Dashboard")
+
+--==================================================
+-- CARD CREATION
+--==================================================
+
+local function CreateCard(parent, title, height)
+    local card = Create("Frame", {
+        BackgroundColor3 = Theme.Card,
+
+        BackgroundTransparency = 0.08,
+
+        BorderSizePixel = 0,
+
+        Size = UDim2.new(1, 0, 0, height or 95),
+
+    }, parent)
+
+    Corner(card, 12)
+    Stroke(card, Theme.Border, 0.5)
+    Padding(card, 13)
+
+    local titleLabel = Label(
+        card,
+        title,
+        11,
+        Theme.Muted,
+        Enum.Font.GothamBold
+    )
+
+    return card, titleLabel
+end
+
+local function CreateMetric(parent, title, initialValue)
+    local card, titleLabel = CreateCard(parent, title, 91)
+
+    local valueLabel = Label(
+        card,
+        initialValue or "--",
+        25,
+        Theme.Text,
+        Enum.Font.GothamBold
+    )
+
+    valueLabel.Position = UDim2.fromOffset(0, 28)
+
+    return valueLabel, card
+end
+
+--==================================================
+-- DASHBOARD PAGE
+--==================================================
+
+local DashboardTitle = Label(
+    DashboardPage,
+    "Dashboard Overview",
+    21,
+    Theme.Text,
+    Enum.Font.GothamBold
+)
+
+local DashboardDescription = Label(
+    DashboardPage,
+    "Real-time information about this game session.",
+    11,
+    Theme.Muted
+)
+
+local MetricsGrid = Create("Frame", {
+    BackgroundTransparency = 1,
+
+    Size = UDim2.new(1, 0, 0, 195),
+
+}, DashboardPage)
+
+local MetricsLayout = Create("UIGridLayout", {
+    CellSize = UDim2.new(0.5, -7, 0, 87),
+
+    CellPadding = UDim2.fromOffset(12, 12),
+
+    SortOrder = Enum.SortOrder.LayoutOrder,
+
+}, MetricsGrid)
+
+local PlayerCountValue = CreateMetric(
+    MetricsGrid,
+    "TOTAL PLAYERS",
+    "0"
+)
+
+local FPSValue = CreateMetric(
+    MetricsGrid,
+    "CLIENT FPS",
+    "0"
+)
+
+local PingValue = CreateMetric(
+    MetricsGrid,
+    "NETWORK PING",
+    "0 ms"
+)
+
+local MemoryValue = CreateMetric(
+    MetricsGrid,
+    "CLIENT MEMORY",
+    "0 MB"
+)
+
+-- Server card
+
+local ServerCard = CreateCard(
+    DashboardPage,
+    "SERVER INFORMATION",
+    132
+)
+
+local ServerPlace = Label(
+    ServerCard,
+    "Place ID: --",
+    11,
+    Theme.Text
+)
+
+ServerPlace.Position = UDim2.fromOffset(0, 27)
+
+local ServerJob = Label(
+    ServerCard,
+    "Job ID: --",
+    10,
+    Theme.Muted
+)
+
+ServerJob.Position = UDim2.fromOffset(0, 52)
+
+local ServerUptime = Label(
+    ServerCard,
+    "Session uptime: --",
+    11,
+    Theme.Text
+)
+
+ServerUptime.Position = UDim2.fromOffset(0, 76)
+
+local OpenPlayersButton = Button(
+    DashboardPage,
+    "Open Player Directory",
+    UDim2.new(1, 0, 0, 42)
+)
+
+OpenPlayersButton.MouseButton1Click:Connect(function()
+    SetPage("Players")
+end)
+
+--==================================================
+-- PLAYER PAGE
+--==================================================
+
+local PlayersTitle = Label(
+    PlayersPage,
+    "Player Directory",
+    21,
+    Theme.Text,
+    Enum.Font.GothamBold
+)
+
+local PlayersDescription = Label(
+    PlayersPage,
+    "Select a player to inspect their public in-game information.",
+    11,
+    Theme.Muted
+)
+
+local SearchBox = Create("TextBox", {
+    BackgroundColor3 = Theme.Card,
+
+    Size = UDim2.new(1, 0, 0, 39),
+
+    PlaceholderText = "Search username or display name...",
+
+    PlaceholderColor3 = Theme.Muted,
+
+    Text = "",
+
+    TextColor3 = Theme.Text,
+
+    TextSize = 12,
+
+    Font = Enum.Font.Gotham,
+
+    ClearTextOnFocus = false,
+
+}, PlayersPage)
+
+Corner(SearchBox, 9)
+Stroke(SearchBox)
+Padding(SearchBox, 10)
+
+local PlayerListCard = CreateCard(
+    PlayersPage,
+    "CONNECTED PLAYERS",
+    230
+)
+
+local PlayerScroll = Create("ScrollingFrame", {
+    Position = UDim2.fromOffset(0, 28),
+
+    Size = UDim2.new(1, 0, 1, -28),
+
+    BackgroundTransparency = 1,
+
+    BorderSizePixel = 0,
+
+    ScrollBarThickness = 3,
+
+    ScrollBarImageColor3 = Theme.Accent,
+
+    CanvasSize = UDim2.new(0, 0, 0, 0),
+
+    AutomaticCanvasSize = Enum.AutomaticSize.Y,
+
+}, PlayerListCard)
+
+local PlayerListLayout = Create("UIListLayout", {
+    Padding = UDim.new(0, 6),
+
+    SortOrder = Enum.SortOrder.Name,
+
+}, PlayerScroll)
+
+-- Player details
+
+local DetailsCard = CreateCard(
+    PlayersPage,
+    "PLAYER DETAILS",
+    270
+)
+
+local SelectedName = Label(
+    DetailsCard,
+    "Select a player",
+    17,
+    Theme.Text,
+    Enum.Font.GothamBold
+)
+
+SelectedName.Position = UDim2.fromOffset(0, 28)
+
+local DetailLabels = {}
+
+local DetailNames = {
+    "Username",
+    "Display Name",
+    "User ID",
+    "Account Age",
+    "Health",
+    "Walk Speed",
+    "Position",
+    "Character Status",
+    "Network Ping",
+}
+
+for index, detail in ipairs(DetailNames) do
+    local line = Label(
+        DetailsCard,
+        detail .. ": --",
+        11,
+        Theme.Muted
+    )
+
+    line.Position = UDim2.fromOffset(
+        0,
+        55 + ((index - 1) * 22)
+    )
+
+    DetailLabels[detail] = line
+end
+
+--==================================================
+-- PLAYER SELECTION
+--==================================================
+
+local function ClearPlayerButtons()
+    for _, child in ipairs(PlayerScroll:GetChildren()) do
+        if child:IsA("TextButton") then
+            child:Destroy()
+        end
+    end
+end
+
+local function UpdatePlayerDetails()
+    local player = State.SelectedPlayer
+
+    if not player or player.Parent ~= Players then
+        SelectedName.Text = "Select a player"
+
+        for name, label in pairs(DetailLabels) do
+            label.Text = name .. ": --"
+        end
+
+        return
+    end
+
+    local humanoid = GetHumanoid(player)
+    local root = GetRoot(player)
+
+    SelectedName.Text = player.DisplayName
+
+    DetailLabels.Username.Text =
+        "Username: @" .. player.Name
+
+    DetailLabels["Display Name"].Text =
+        "Display Name: " .. player.DisplayName
+
+    DetailLabels["User ID"].Text =
+        "User ID: " .. player.UserId
+
+    DetailLabels["Account Age"].Text =
+        "Account Age: " .. player.AccountAge .. " days"
+
+    if humanoid then
+        DetailLabels.Health.Text = string.format(
+            "Health: %d / %d",
+            math.floor(humanoid.Health),
+            math.floor(humanoid.MaxHealth)
+        )
+
+        DetailLabels["Walk Speed"].Text =
+            "Walk Speed: " .. humanoid.WalkSpeed
+
+        DetailLabels["Character Status"].Text =
+            "Character Status: " .. humanoid:GetState().Name
+    else
+        DetailLabels.Health.Text = "Health: No character"
+        DetailLabels["Walk Speed"].Text = "Walk Speed: --"
+        DetailLabels["Character Status"].Text = "Character Status: Unavailable"
+    end
+
+    if root then
+        local position = root.Position
+
+        DetailLabels.Position.Text = string.format(
+            "Position: %.1f, %.1f, %.1f",
+            position.X,
+            position.Y,
+            position.Z
+        )
+    else
+        DetailLabels.Position.Text = "Position: --"
+    end
+
+    DetailLabels["Network Ping"].Text =
+        "Network Ping: " .. GetPing(player) .. " ms"
+end
+
+local function SelectPlayer(player)
+    State.SelectedPlayer = player
+    UpdatePlayerDetails()
+end
+
+local function RefreshPlayerList()
+    ClearPlayerButtons()
+
+    local search = string.lower(SearchBox.Text)
+
+    local sortedPlayers = Players:GetPlayers()
+
+    table.sort(sortedPlayers, function(a, b)
+        return string.lower(a.Name) < string.lower(b.Name)
+    end)
+
+    for _, player in ipairs(sortedPlayers) do
+        local usernameMatch = string.find(
+            string.lower(player.Name),
+            search,
+            1,
+            true
+        )
+
+        local displayMatch = string.find(
+            string.lower(player.DisplayName),
+            search,
+            1,
+            true
+        )
+
+        if search == "" or usernameMatch or displayMatch then
+            local playerButton = Button(
+                PlayerScroll,
+                player.DisplayName .. "  (@" .. player.Name .. ")",
+                UDim2.new(1, -5, 0, 35)
+            )
+
+            playerButton.Name = player.Name
+
+            playerButton.TextXAlignment = Enum.TextXAlignment.Left
+
+            Padding(playerButton, 9)
+
+            playerButton.MouseButton1Click:Connect(function()
+                SelectPlayer(player)
+            end)
+        end
+    end
+
+    UpdatePlayerDetails()
+end
+
+SearchBox:GetPropertyChangedSignal("Text"):Connect(
+    RefreshPlayerList
+)
+
+--==================================================
+-- DIAGNOSTICS PAGE
+--==================================================
+
+local DiagnosticsTitle = Label(
+    DiagnosticsPage,
+    "System Diagnostics",
+    21,
+    Theme.Text,
+    Enum.Font.GothamBold
+)
+
+local DiagnosticsDescription = Label(
+    DiagnosticsPage,
+    "Live client and game-session diagnostics.",
+    11,
+    Theme.Muted
+)
+
+local DiagnosticsCard = CreateCard(
+    DiagnosticsPage,
+    "CLIENT PERFORMANCE",
+    175
+)
+
+local DiagnosticFPS = Label(
+    DiagnosticsCard,
+    "FPS: --",
+    12,
+    Theme.Text
+)
+
+DiagnosticFPS.Position = UDim2.fromOffset(0, 29)
+
+local DiagnosticPing = Label(
+    DiagnosticsCard,
+    "Network Ping: --",
+    12,
+    Theme.Text
+)
+
+DiagnosticPing.Position = UDim2.fromOffset(0, 55)
+
+local DiagnosticMemory = Label(
+    DiagnosticsCard,
+    "Memory: --",
+    12,
+    Theme.Text
+)
+
+DiagnosticMemory.Position = UDim2.fromOffset(0, 81)
+
+local DiagnosticPlayers = Label(
+    DiagnosticsCard,
+    "Connected Players: --",
+    12,
+    Theme.Text
+)
+
+DiagnosticPlayers.Position = UDim2.fromOffset(0, 107)
+
+local DiagnosticStatus = Label(
+    DiagnosticsCard,
+    "Monitoring: Active",
+    12,
+    Theme.Success
+)
+
+DiagnosticStatus.Position = UDim2.fromOffset(0, 133)
+
+local ServerDiagnostics = CreateCard(
+    DiagnosticsPage,
+    "SESSION INFORMATION",
+    125
+)
+
+local PlaceInfo = Label(
+    ServerDiagnostics,
+    "Place: --",
+    11,
+    Theme.Text
+)
+
+PlaceInfo.Position = UDim2.fromOffset(0, 30)
+
+local ServerTime = Label(
+    ServerDiagnostics,
+    "Server Runtime: --",
+    11,
+    Theme.Text
+)
+
+ServerTime.Position = UDim2.fromOffset(0, 57)
+
+local RefreshButton = Button(
+    DiagnosticsPage,
+    "Refresh Player Directory",
+    UDim2.new(1, 0, 0, 40)
+)
+
+RefreshButton.MouseButton1Click:Connect(function()
+    RefreshPlayerList()
+end)
+
+--==================================================
+-- PERFORMANCE TRACKING
+--==================================================
+
+local frameCount = 0
+local elapsed = 0
+
+local sessionStart = Workspace.DistributedGameTime
+
+local function UpdateFPS(deltaTime)
+    frameCount += 1
+    elapsed += deltaTime
+
+    if elapsed >= 1 then
+        State.FPS = math.floor(frameCount / elapsed)
+
+        frameCount = 0
+        elapsed = 0
+    end
+end
+
+--==================================================
+-- LIVE DASHBOARD UPDATES
+--==================================================
+
+local function UpdateDashboard()
+    local players = Players:GetPlayers()
+
+    State.Ping = GetPing(LocalPlayer)
+    State.Memory = GetMemory()
+
+    PlayerCountValue.Text = #players
+
+    FPSValue.Text = State.FPS
+
+    PingValue.Text = State.Ping .. " ms"
+
+    MemoryValue.Text = State.Memory .. " MB"
+
+    ServerPlace.Text =
+        "Place ID: " .. game.PlaceId
+
+    ServerJob.Text =
+        "Job ID: " .. (game.JobId ~= "" and game.JobId or "Studio session")
+
+    ServerUptime.Text = string.format(
+        "Session uptime: %d seconds",
+        math.floor(Workspace.DistributedGameTime - sessionStart)
+    )
+
+    DiagnosticFPS.Text =
+        "FPS: " .. State.FPS
+
+    DiagnosticPing.Text =
+        "Network Ping: " .. State.Ping .. " ms"
+
+    DiagnosticMemory.Text =
+        "Memory: " .. State.Memory .. " MB"
+
+    DiagnosticPlayers.Text =
+        "Connected Players: " .. #players
+
+    PlaceInfo.Text =
+        "Place: " .. game.PlaceId
+
+    ServerTime.Text = string.format(
+        "Server Runtime: %d seconds",
+        math.floor(Workspace.DistributedGameTime)
+    )
+
+    UpdatePlayerDetails()
+end
+
+--==================================================
+-- PLAYER EVENTS
+--==================================================
+
+local function OnPlayerAdded(player)
+    RefreshPlayerList()
+end
+
+local function OnPlayerRemoving(player)
+    if State.SelectedPlayer == player then
+        State.SelectedPlayer = nil
+    end
+
+    RefreshPlayerList()
+end
+
+table.insert(
+    State.Connections,
+    Players.PlayerAdded:Connect(OnPlayerAdded)
+)
+
+table.insert(
+    State.Connections,
+    Players.PlayerRemoving:Connect(OnPlayerRemoving)
+)
+
+--==================================================
+-- RENDER LOOP
+--==================================================
+
+table.insert(
+    State.Connections,
+    RunService.RenderStepped:Connect(function(deltaTime)
+        if not State.Running then
+            return
+        end
+
+        UpdateFPS(deltaTime)
+    end)
+)
+
+--==================================================
+-- PERIODIC UPDATE LOOP
+--==================================================
+
+task.spawn(function()
+    while State.Running and ScreenGui.Parent do
+        UpdateDashboard()
+
+        if State.CurrentPage == "Players" then
+            UpdatePlayerDetails()
+        end
+
+        task.wait(Config.UpdateInterval)
+    end
+end)
+
+--==================================================
+-- KEYBOARD CONTROLS
+--==================================================
+
+table.insert(
+    State.Connections,
+    UserInputService.InputBegan:Connect(function(input, processed)
+        if processed then
+            return
+        end
+
+        if input.KeyCode == Config.ToggleKey then
+            State.Visible = not State.Visible
+
+            Main.Visible = State.Visible
+        end
+    end)
+)
+
+--==================================================
+-- CLEANUP
+--==================================================
+
+local function Cleanup()
+    if not State.Running then
+        return
+    end
+
+    State.Running = false
+
+    for _, connection in ipairs(State.Connections) do
+        if connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    for _, connection in pairs(State.PlayerConnections) do
+        if connection.Connected then
+            connection:Disconnect()
+        end
+    end
+
+    table.clear(State.Connections)
+    table.clear(State.PlayerConnections)
+end
+
+table.insert(
+    State.Connections,
+    ScreenGui.Destroying:Connect(Cleanup)
+)
+
+--==================================================
+-- INITIALIZATION
+--==================================================
+
+RefreshPlayerList()
+
+UpdateDashboard()
+
+Main.Visible = true
+
+print("[PlayerMonitorV4] Successfully initialized.")
+print("[PlayerMonitorV4] Toggle key: RightShift")
